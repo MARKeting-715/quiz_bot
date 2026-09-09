@@ -32,13 +32,24 @@ selected_quizzes: dict[int, int] = {}
 class Session:
     quiz_id: int
     questions: list[Question]
-    position: int = 0
+    position: int = -1
+    remaining: list[int] = field(default_factory=list)
+    correct_answers: int = 0
     picked: set[int] = field(default_factory=set)
     message_id: int | None = None
     finished: bool = False
 
 
 sessions: dict[tuple[int, str], Session] = {}
+
+
+def choose_next_question(session: Session) -> None:
+    """Choose a new question without repeats during the current round."""
+    session.position = random.choice(session.remaining)
+    session.remaining.remove(session.position)
+    session.picked.clear()
+    # A repeated question in a later round receives a freshly shuffled button order.
+    session._options_position = None  # type: ignore[attr-defined]
 
 
 def esc(value: str) -> str:
@@ -130,21 +141,30 @@ async def show_question(user_id: int, sid: str, message: Message) -> None:
     session = sessions[(user_id, sid)]
     question = session.questions[session.position]
     instruction = {"single": "Выберите один вариант.", "multiple": "Отметьте все верные варианты и нажмите «Подтвердить».", "text": "Напишите ответ следующим сообщением."}[question.kind]
-    text = f"<b>Задание {session.position + 1}/{len(session.questions)}</b>\n\n{esc(question.text)}\n\n<i>{instruction}</i>"
+    number = len(session.questions) - len(session.remaining)
+    text = f"<b>Задание {number}/{len(session.questions)}</b>\n\n{esc(question.text)}\n\n<i>{instruction}</i>"
     await message.edit_text(text, reply_markup=question_keyboard(sid, session, question))
 
 
-def result_keyboard(sid: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Следующее задание", callback_data=f"next:{sid}")],
-        [InlineKeyboardButton(text="Остановить опрос", callback_data=f"stop:{sid}")],
-    ])
+def result_keyboard(sid: str, session: Session) -> InlineKeyboardMarkup:
+    if session.remaining:
+        rows = [[InlineKeyboardButton(text="Следующее задание", callback_data=f"next:{sid}")]]
+    else:
+        rows = [[
+            InlineKeyboardButton(text="Завершить", callback_data=f"finish:{sid}"),
+            InlineKeyboardButton(text="Продолжить опрос", callback_data=f"continue:{sid}"),
+        ]]
+    rows.append([InlineKeyboardButton(text="Остановить опрос", callback_data=f"stop:{sid}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def show_result(query: CallbackQuery, sid: str, correct: bool, detail: str) -> None:
     session = sessions[(query.from_user.id, sid)]
+    if correct:
+        session.correct_answers += 1
     prefix = "✅ <b>Верно!</b>" if correct else "❌ <b>Пока не получилось.</b>"
-    await query.message.edit_text(f"{prefix}\n\n{detail}", reply_markup=result_keyboard(sid))
+    status = f"<i>Результат раунда: {session.correct_answers}/{len(session.questions) - len(session.remaining)}</i>"
+    await query.message.edit_text(f"{prefix}\n\n{detail}\n\n{status}", reply_markup=result_keyboard(sid, session))
 
 
 @router.message(CommandStart())
@@ -244,15 +264,18 @@ async def receive_source_or_answer(message: Message) -> None:
     submitted = message.text.strip()
     correct_answer = question.answers[0]
     correct = submitted.casefold() == correct_answer.casefold()
+    if correct:
+        session.correct_answers += 1
     detail = (f"Ваш ответ: «{esc(submitted)}».\nПравильный ответ: «{esc(correct_answer)}»." if not correct
               else f"Ответ «{esc(submitted)}» принят. Отличная работа!")
     try:
         await message.delete()
     except Exception:
         pass
-    quiz_message = await message.bot.edit_message_text(chat_id=message.chat.id, message_id=session.message_id,
-        text=("✅ <b>Верно!</b>\n\n" if correct else "❌ <b>Пока не получилось.</b>\n\n") + detail,
-        reply_markup=result_keyboard(sid))
+    prefix = "✅ <b>Верно!</b>" if correct else "❌ <b>Пока не получилось.</b>"
+    status = f"<i>Результат раунда: {session.correct_answers}/{len(session.questions) - len(session.remaining)}</i>"
+    await message.bot.edit_message_text(chat_id=message.chat.id, message_id=session.message_id,
+        text=f"{prefix}\n\n{detail}\n\n{status}", reply_markup=result_keyboard(sid, session))
 
 
 @router.callback_query(F.data.startswith("start:"))
@@ -264,6 +287,8 @@ async def start_quiz(query: CallbackQuery) -> None:
     random.shuffle(questions)
     sid = f"{random.randrange(16**7):07x}"
     session = Session(quiz_id, questions)
+    session.remaining = list(range(len(questions)))
+    choose_next_question(session)
     sessions[(query.from_user.id, sid)] = session
     # Validate all button questions before opening a new quiz message.
     try:
@@ -335,12 +360,10 @@ async def next_question(query: CallbackQuery) -> None:
     sid = query.data.split(":")[1]
     session = sessions.get((query.from_user.id, sid))
     if not session: return
-    session.position += 1
-    session.picked.clear()
-    if session.position == len(session.questions):
-        # The test has no natural end: begin a newly shuffled round instead.
-        random.shuffle(session.questions)
-        session.position = 0
+    if not session.remaining:
+        await query.answer("Раунд завершён: выберите «Продолжить опрос» или «Завершить».", show_alert=True)
+        return
+    choose_next_question(session)
     await show_question(query.from_user.id, sid, query.message)
     await query.answer()
 
@@ -350,7 +373,40 @@ async def stop_quiz(query: CallbackQuery) -> None:
     sid = query.data.split(":")[1]
     session = sessions.get((query.from_user.id, sid))
     if session: session.finished = True
-    await query.message.edit_text("Опрос остановлен. Результат не сохранён.")
+    if session:
+        asked = len(session.questions) - len(session.remaining)
+        text = f"Опрос остановлен.\n\n<b>Результат: {session.correct_answers}/{asked}</b>"
+    else:
+        text = "Опрос остановлен."
+    await query.message.edit_text(text, reply_markup=close_keyboard())
+    await query.answer()
+
+
+@router.callback_query(F.data.startswith("continue:"))
+async def continue_quiz(query: CallbackQuery) -> None:
+    sid = query.data.split(":")[1]
+    session = sessions.get((query.from_user.id, sid))
+    if not session or session.finished:
+        await query.answer("Этот опрос уже закрыт.", show_alert=True)
+        return
+    session.remaining = list(range(len(session.questions)))
+    session.correct_answers = 0
+    choose_next_question(session)
+    await show_question(query.from_user.id, sid, query.message)
+    await query.answer()
+
+
+@router.callback_query(F.data.startswith("finish:"))
+async def finish_quiz(query: CallbackQuery) -> None:
+    sid = query.data.split(":")[1]
+    session = sessions.get((query.from_user.id, sid))
+    if not session:
+        return
+    session.finished = True
+    await query.message.edit_text(
+        f"🎉 <b>Опрос завершён!</b>\n\n<b>Итог: {session.correct_answers}/{len(session.questions)}</b>",
+        reply_markup=close_keyboard(),
+    )
     await query.answer()
 
 
