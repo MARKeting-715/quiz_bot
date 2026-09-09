@@ -8,7 +8,7 @@
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-$env:BOT_TOKEN = "токен_бота_из_BotFather"
+$env:BOT_TOKEN = "токен_бота_из_BotFather"  # либо создайте .env: BOT_TOKEN=...
 py bot.py
 ```
 

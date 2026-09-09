@@ -13,10 +13,13 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.client.default import DefaultBotProperties
+from dotenv import load_dotenv
 
 from compiler import QuizSyntaxError, Question, compile_quiz
 from storage import QuizStorage
 
+# A local .env is convenient on hosting; a real environment variable still wins.
+load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN", "")
 storage = QuizStorage()
 router = Router()
