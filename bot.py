@@ -52,9 +52,27 @@ def dashboard_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def close_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Закрыть", callback_data="close")]])
+
+
 async def edit_dashboard(query: CallbackQuery, text: str, markup: InlineKeyboardMarkup) -> None:
     await query.message.edit_text(text, reply_markup=markup)
     dashboard_messages[query.from_user.id] = query.message.message_id
+
+
+async def update_dashboard_from_message(message: Message, text: str, markup: InlineKeyboardMarkup) -> None:
+    """Update the persistent menu, falling back to a new one only if it was removed."""
+    dashboard_id = dashboard_messages.get(message.from_user.id)
+    if dashboard_id:
+        try:
+            await message.bot.edit_message_text(chat_id=message.chat.id, message_id=dashboard_id,
+                                                text=text, reply_markup=markup)
+            return
+        except Exception:
+            pass
+    sent = await message.answer(text, reply_markup=markup)
+    dashboard_messages[message.from_user.id] = sent.message_id
 
 
 def quizzes_keyboard(selected: int | None, page: int) -> InlineKeyboardMarkup:
@@ -116,10 +134,9 @@ async def show_question(user_id: int, sid: str, message: Message) -> None:
     await message.edit_text(text, reply_markup=question_keyboard(sid, session, question))
 
 
-def result_keyboard(sid: str, has_next: bool) -> InlineKeyboardMarkup:
-    label = "Следующее задание" if has_next else "Завершить"
+def result_keyboard(sid: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=label, callback_data=f"next:{sid}")],
+        [InlineKeyboardButton(text="Следующее задание", callback_data=f"next:{sid}")],
         [InlineKeyboardButton(text="Остановить опрос", callback_data=f"stop:{sid}")],
     ])
 
@@ -127,7 +144,7 @@ def result_keyboard(sid: str, has_next: bool) -> InlineKeyboardMarkup:
 async def show_result(query: CallbackQuery, sid: str, correct: bool, detail: str) -> None:
     session = sessions[(query.from_user.id, sid)]
     prefix = "✅ <b>Верно!</b>" if correct else "❌ <b>Пока не получилось.</b>"
-    await query.message.edit_text(f"{prefix}\n\n{detail}", reply_markup=result_keyboard(sid, session.position + 1 < len(session.questions)))
+    await query.message.edit_text(f"{prefix}\n\n{detail}", reply_markup=result_keyboard(sid))
 
 
 @router.message(CommandStart())
@@ -181,9 +198,9 @@ async def ask_source(query: CallbackQuery) -> None:
 async def delete_quiz(message: Message) -> None:
     name = (message.text or "").partition(" ")[2].strip()
     if not name:
-        await message.answer("Использование: <code>/delete Название опроса</code>")
+        await message.answer("Использование: <code>/delete Название опроса</code>", reply_markup=close_keyboard())
         return
-    await message.answer("Опрос удалён." if storage.delete_by_name(name) else "Опрос с таким названием не найден.")
+    await message.answer("Опрос удалён." if storage.delete_by_name(name) else "Опрос с таким названием не найден.", reply_markup=close_keyboard())
 
 
 @router.message(F.text)
@@ -195,13 +212,21 @@ async def receive_source_or_answer(message: Message) -> None:
             fallback = f"Опрос {datetime.now():%Y-%m-%d %H:%M}"
             name = storage.save_quiz(draft, message.text, fallback)
         except QuizSyntaxError as exc:
-            await message.answer(f"<b>Не удалось добавить опрос.</b>\n{esc(str(exc))}")
+            await message.answer(f"<b>Не удалось добавить опрос.</b>\n{esc(str(exc))}", reply_markup=close_keyboard())
             return
         except sqlite3.IntegrityError:
-            await message.answer("Опрос с таким названием уже есть. Измените строку <code>@ ...</code>.")
+            await message.answer("Опрос с таким названием уже есть. Измените строку <code>@ ...</code>.", reply_markup=close_keyboard())
             return
         waiting_for_source.discard(user_id)
-        await message.answer(f"✅ Опрос «{esc(name)}» добавлен: {len(draft.questions)} заданий.")
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await update_dashboard_from_message(
+            message,
+            f"✅ Опрос «{esc(name)}» добавлен: {len(draft.questions)} заданий.\n\nВыберите действие.",
+            dashboard_keyboard(),
+        )
         return
 
     # A text reply belongs to the only active session of this user.
@@ -221,7 +246,7 @@ async def receive_source_or_answer(message: Message) -> None:
         pass
     quiz_message = await message.bot.edit_message_text(chat_id=message.chat.id, message_id=session.message_id,
         text=("✅ <b>Верно!</b>\n\n" if correct else "❌ <b>Пока не получилось.</b>\n\n") + detail,
-        reply_markup=result_keyboard(sid, session.position + 1 < len(session.questions)))
+        reply_markup=result_keyboard(sid))
 
 
 @router.callback_query(F.data.startswith("start:"))
@@ -229,6 +254,7 @@ async def start_quiz(query: CallbackQuery) -> None:
     quiz_id = int(query.data.split(":")[1])
     selected_quizzes.pop(query.from_user.id, None)
     questions = storage.questions_for(quiz_id)
+    random.shuffle(questions)
     sid = f"{random.randrange(16**7):07x}"
     session = Session(quiz_id, questions)
     sessions[(query.from_user.id, sid)] = session
@@ -305,10 +331,10 @@ async def next_question(query: CallbackQuery) -> None:
     session.position += 1
     session.picked.clear()
     if session.position == len(session.questions):
-        session.finished = True
-        await query.message.edit_text("🎉 <b>Опрос завершён!</b>\n\nСпасибо за прохождение.")
-    else:
-        await show_question(query.from_user.id, sid, query.message)
+        # The test has no natural end: begin a newly shuffled round instead.
+        random.shuffle(session.questions)
+        session.position = 0
+    await show_question(query.from_user.id, sid, query.message)
     await query.answer()
 
 
@@ -323,6 +349,12 @@ async def stop_quiz(query: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "noop")
 async def noop(query: CallbackQuery) -> None:
+    await query.answer()
+
+
+@router.callback_query(F.data == "close")
+async def close_message(query: CallbackQuery) -> None:
+    await query.message.delete()
     await query.answer()
 
 
