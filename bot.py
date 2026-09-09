@@ -156,6 +156,7 @@ async def start(message: Message) -> None:
 @router.callback_query(F.data == "home")
 async def home(query: CallbackQuery) -> None:
     selected_quizzes.pop(query.from_user.id, None)
+    waiting_for_source.discard(query.from_user.id)
     await edit_dashboard(query, "Выберите действие.", dashboard_keyboard())
     await query.answer()
 
@@ -206,7 +207,13 @@ async def delete_quiz(message: Message) -> None:
 @router.message(F.text)
 async def receive_source_or_answer(message: Message) -> None:
     user_id = message.from_user.id
-    if user_id in waiting_for_source:
+    # An active typing task has priority.  A stale "add quiz" flag must never
+    # turn the student's answer into source code for a new quiz.
+    candidates = [(sid, s) for (uid, sid), s in sessions.items()
+                  if uid == user_id and not s.finished and s.questions[s.position].kind == "text"]
+    if candidates:
+        waiting_for_source.discard(user_id)
+    if user_id in waiting_for_source and not candidates:
         try:
             draft = compile_quiz(message.text)
             fallback = f"Опрос {datetime.now():%Y-%m-%d %H:%M}"
@@ -230,7 +237,6 @@ async def receive_source_or_answer(message: Message) -> None:
         return
 
     # A text reply belongs to the only active session of this user.
-    candidates = [(sid, s) for (uid, sid), s in sessions.items() if uid == user_id and not s.finished and s.questions[s.position].kind == "text"]
     if not candidates:
         return
     sid, session = candidates[-1]
@@ -253,6 +259,7 @@ async def receive_source_or_answer(message: Message) -> None:
 async def start_quiz(query: CallbackQuery) -> None:
     quiz_id = int(query.data.split(":")[1])
     selected_quizzes.pop(query.from_user.id, None)
+    waiting_for_source.discard(query.from_user.id)
     questions = storage.questions_for(quiz_id)
     random.shuffle(questions)
     sid = f"{random.randrange(16**7):07x}"
