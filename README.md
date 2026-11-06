@@ -4,15 +4,43 @@
 
 ## Запуск
 
+Выполняйте команды из корня репозитория. Код использует синтаксис Python 3.10+. Создайте бота через @BotFather и сохраните его токен в локальном файле `.env`.
+
+### Windows (PowerShell)
+
 ```powershell
 py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-$env:BOT_TOKEN = "токен_бота_из_BotFather"  # либо создайте .env: BOT_TOKEN=...
-py bot.py
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
-Рядом с `bot.py` автоматически появится `quizzes.sqlite3`.
+Откройте `.env` в текстовом редакторе и замените значение `BOT_TOKEN` токеном своего бота. Если `.env` уже настроен, сохраните его вместо повторного копирования шаблона. Затем запустите:
+
+```powershell
+.\.venv\Scripts\python.exe bot.py
+```
+
+### Linux / macOS
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+cp .env.example .env
+```
+
+Укажите токен в `.env` так же, как описано выше, затем запустите:
+
+```bash
+.venv/bin/python bot.py
+```
+
+### Настройки и данные
+
+Переменная окружения `BOT_TOKEN`, если она уже задана, имеет приоритет над значением из `.env`. Не публикуйте настоящий токен: `.env` исключён из Git, а `.env.example` служит только шаблоном.
+
+При запуске автоматически создаётся `quizzes.sqlite3` в текущей рабочей папке процесса. При запуске из корня репозитория база будет рядом с `bot.py`. В базе хранятся импортированные опросы; перед переносом или резервным копированием файла остановите бота.
+
+После запуска откройте своего бота в Telegram и отправьте `/start`.
 
 ## Формат опроса
 
